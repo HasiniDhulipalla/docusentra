@@ -233,3 +233,8 @@ This bundle is source code and documentation, not a public GitHub URL, live HTTP
 ## Local recovery if the audit verifier blocks startup
 
 If logs say `event_hash_mismatch` and also say the legacy/key fallback verifiers failed, do not delete database volumes or repeatedly regenerate keys. Read [`AUDIT_RECOVERY_README.md`](AUDIT_RECOVERY_README.md). On a local development database only, run `.\recover-audit-chain.ps1`. It creates a host-side SQL backup, asks for explicit confirmation, archives the old chain as **unverified** (without discarding its rows), creates and verifies a new HMAC chain, and restarts the API without the recovery flag. This break-glass procedure is intentionally disabled in production.
+
+
+### Vercel combined deployment note
+
+For a single Vercel Services project, the backend entrypoint is `backend/index.py` (`index:app` in the service config), which exports the FastAPI ASGI `app`. The backend installs the official `vercel` Python SDK to use `vercel.blob` for private Blob storage. See `VERCEL_BACKEND_DEPLOYMENT.md`.

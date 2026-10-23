@@ -318,7 +318,7 @@ def _blob_sync_client():
     try:
         from vercel.blob import sync as blob_sync
     except ImportError as exc:
-        raise RuntimeError("Install the vercel-blob Python SDK to use Vercel private storage.") from exc
+        raise RuntimeError("Install the official vercel Python SDK to use Vercel private storage.") from exc
     return blob_sync
 
 

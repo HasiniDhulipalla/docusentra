@@ -35,7 +35,7 @@ git push
 The services are configured as:
 
 - Frontend service: root `frontend/`, Vite build `npm run build`, output `dist`, SPA fallback to `/index.html`.
-- Backend service: root `backend/`, FastAPI entrypoint `app.main:app`, max function duration 60 seconds.
+- Backend service: root `backend/`, FastAPI ASGI entrypoint `index:app` (the `backend/index.py` wrapper imports `app.main:app`), max function duration 60 seconds. The backend requirements use the official `vercel` Python SDK for Blob APIs.
 - Public routing: `/api/*` goes to the backend service, then `/*` to the frontend service. The API receives the original `/api/...` path.
 
 ## 3. Remove the old split-backend URL from frontend environment
@@ -101,3 +101,8 @@ The public registration endpoint creates standard owner accounts; it does not le
 - Vercel serverless does not include LibreOffice, so Office preview fidelity is limited compared with the local Docker build.
 - An ordinary browser application cannot reliably prevent OS screenshots or screen recording.
 - This remains a challenge/demo MVP. Verify all authorization routes and the live deployment before using real confidential documents.
+
+
+## Runtime import fix
+
+The backend exposes a conventional `backend/index.py` entrypoint and uses `entrypoint: "index:app"`. This avoids relying on a nested module path for ASGI detection. The `requirements.txt` uses the official `vercel` package, because application code imports `vercel.blob`; the unrelated `vercel-blob` distribution is not the SDK used by this source.
