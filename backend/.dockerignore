@@ -1,0 +1,7 @@
+__pycache__
+*.py[cod]
+.venv
+.env
+private_storage
+trustvault.db
+tests

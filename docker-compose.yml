@@ -1,0 +1,79 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: trustvault-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: trustvault
+      POSTGRES_USER: trustvault
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-trustvault_local_change_me}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - trustvault_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trustvault -d trustvault"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: ./backend
+    container_name: trustvault-api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg://trustvault:${POSTGRES_PASSWORD:-trustvault_local_change_me}@db:5432/trustvault
+      STORAGE_DIR: /app/private_storage
+      APP_ENV: ${APP_ENV:-development}
+      TOKEN_SECRET: ${TOKEN_SECRET:-}
+      AUDIT_HMAC_SECRET: ${AUDIT_HMAC_SECRET:-}
+      # Explicit one-time local recovery only; never enable in production.
+      TRUSTVAULT_AUDIT_RECOVERY: ${TRUSTVAULT_AUDIT_RECOVERY:-}
+      TOKEN_TTL_SECONDS: 28800
+      MAX_UPLOAD_BYTES: 15728640
+      FRONTEND_ORIGINS: ${FRONTEND_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080,http://localhost:5173,http://127.0.0.1:5173}
+      SEED_ADMIN_USERNAME: ${SEED_ADMIN_USERNAME:-}
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-}
+      SEED_OWNER_USERNAME: ${SEED_OWNER_USERNAME:-}
+      SEED_OWNER_EMAIL: ${SEED_OWNER_EMAIL:-}
+      SEED_OWNER_PASSWORD: ${SEED_OWNER_PASSWORD:-}
+      SEED_VIEWER_USERNAME: ${SEED_VIEWER_USERNAME:-}
+      SEED_VIEWER_EMAIL: ${SEED_VIEWER_EMAIL:-}
+      SEED_VIEWER_PASSWORD: ${SEED_VIEWER_PASSWORD:-}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - trustvault_private_files:/app/private_storage
+    # Defense-in-depth for Office conversion; keep only private storage writable.
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+      - /home/appuser:size=64m,uid=10001,gid=10001,mode=0700
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)"]
+      interval: 10s
+      timeout: 4s
+      retries: 10
+      start_period: 10s
+
+  frontend:
+    build: ./frontend
+    container_name: trustvault-frontend
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:80"
+
+volumes:
+  trustvault_pgdata:
+  trustvault_private_files:

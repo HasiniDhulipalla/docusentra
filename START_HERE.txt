@@ -1,0 +1,22 @@
+DOCUSENTRA — READ THIS FIRST
+
+This project ZIP was prepared from the actual project ZIP you uploaded. It fixes the repeated audit-chain startup failure with a one-time local recovery procedure that preserves the prior audit records rather than fabricating hashes.
+
+IMPORTANT: Apply this update in your EXISTING project folder so Docker keeps using the same named database volume. Preserve your existing .env. Do not run `docker compose down -v`.
+
+1. Extract this ZIP to a temporary folder.
+2. Copy its `trustvault-starter` contents into your existing `trustvault-starter` project folder, replacing project code files. Do NOT replace/delete your existing .env. This source ZIP intentionally does not contain .env or your database backups.
+3. Open PowerShell in that existing folder. Make sure Docker Desktop is running and the `trustvault-db` container can be reached.
+4. Run:
+   powershell -ExecutionPolicy Bypass -File .\recover-audit-chain.ps1
+5. Read the prompt. The script will create a PostgreSQL backup first. Type ARCHIVE only if you agree to preserve the unverifiable old event chain as UNVERIFIED evidence and start a new verified audit chain.
+6. The script rebuilds the API, performs the one-time recovery, clears the recovery flag, restarts without recovery mode, verifies the new chain, and starts all services. It will print the path of the SQL backup.
+7. Confirm:
+   docker compose ps
+   docker compose logs --tail=60 api
+   docker compose exec -T api python -m app.verify_audit
+   Open http://localhost:8080
+
+What remains preserved: user accounts, documents, shares, private uploaded files, plus the full prior audit event rows and their old claimed hashes in the append-only `audit_event_archives` table and the SQL backup. The old events are explicitly marked PRESERVED_BUT_UNVERIFIED because no available original key/format verified them. Do not present those old rows as authenticated audit evidence. The archive digest is anchored in a new HMAC event. This one-time recovery is disabled in APP_ENV=production.
+
+Verification performed in the authoring environment: 27 backend tests pass; Python compile and Docker Compose YAML parsing pass. Docker Engine and PowerShell were not available here, so the final Windows recovery/deployment run must be confirmed on your system.
