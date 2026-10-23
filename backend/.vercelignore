@@ -1,0 +1,18 @@
+# Vercel receives source code and requirements, not local-only data or Docker setup.
+.env
+.env.*
+!.env.example
+private_storage/
+*.db
+*.sqlite
+*.sqlite3
+*.sql
+*.dump
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+tests/
+Dockerfile
+.dockerignore

@@ -1,9 +1,11 @@
-# Secrets / local config
+# Environment variables / secrets (keep only safe templates)
 .env
+.env.*
+!.env.example
+!backend/.env.example
+!frontend/.env.example
 backend/.env
 frontend/.env
-frontend/.env.*
-!frontend/.env.example
 
 # Python
 __pycache__/
@@ -11,28 +13,23 @@ __pycache__/
 .venv/
 backend/trustvault.db
 backend/private_storage/
+private_storage/
 
 # Node
 node_modules/
+frontend/node_modules/
 frontend/dist/
 
 # Test artifacts
 .pytest_cache/
 .coverage
 htmlcov/
-# Local database backups (may contain private audit/document metadata)
+
+# Local database / audit recovery artifacts may contain confidential metadata
 trustvault-before-*.sql
 trustvault-pre-audit-recovery-*.sql
-*.gitbundle
-.env.*
-!.env.example
-*.db
-*.sqlite
-*.sqlite3
-*.dump
 *-backup.sql
 *audit-archive*
 *recovery-archive*
-private_storage/
-venv/
-frontend/node_modules/
+*.gitbundle
+.vercel/

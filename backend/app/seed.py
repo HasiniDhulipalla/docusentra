@@ -13,8 +13,8 @@ from pathlib import Path
 from sqlalchemy import func, or_, select
 
 from app.main import (
-    APP_ENV, STORAGE_DIR, Document, DocumentShare, SessionLocal, User,
-    hash_password, initialize_database, now_utc, record_event, validate_runtime_config,
+    APP_ENV, STORAGE_BACKEND, STORAGE_DIR, Document, DocumentShare, SessionLocal, User,
+    _blob_path, hash_password, initialize_database, now_utc, record_event, validate_runtime_config,
 )
 
 LOCAL_DEMO = {
@@ -53,6 +53,34 @@ def _resolve_existing_seed_user(found_by_name: User | None, found_by_email: User
         "Seed identity collision: the configured username and email do not both match the "
         "same existing account. Choose unused seed identifiers or reconcile the account manually."
     )
+
+
+
+
+def _store_sample_file(storage_key: str, content: bytes) -> None:
+    """Store the demonstration file in local disk or a connected private Vercel Blob store."""
+    if STORAGE_BACKEND == "vercel_blob":
+        try:
+            from vercel.blob import sync as blob_sync
+            blob_sync.put_blob(_blob_path(storage_key), content, access="private", content_type="text/plain", add_random_suffix=False)
+        except Exception as exc:
+            raise RuntimeError("Could not store the demo document in private Vercel Blob storage.") from exc
+    else:
+        STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+        (STORAGE_DIR / storage_key).write_bytes(content)
+
+
+def _sample_file_exists(storage_key: str) -> bool:
+    if STORAGE_BACKEND == "vercel_blob":
+        try:
+            from vercel.blob import sync as blob_sync
+            blob_sync.head_blob(_blob_path(storage_key))
+            return True
+        except FileNotFoundError:
+            return False
+        except Exception as exc:
+            raise RuntimeError("Could not check the demo document in private Vercel Blob storage.") from exc
+    return (STORAGE_DIR / storage_key).is_file()
 
 
 def seed() -> None:
@@ -100,7 +128,7 @@ def seed() -> None:
         )
         if sample is None:
             storage_key = uuid.uuid4().hex
-            (STORAGE_DIR / storage_key).write_text(sample_text, encoding="utf-8")
+            _store_sample_file(storage_key, sample_text.encode("utf-8"))
             sample = Document(owner_id=owner.id, filename=sample_name, category="Security",
                               storage_key=storage_key, content_type="text/plain", size_bytes=len(sample_text.encode()),
                               created_at=now_utc(), updated_at=now_utc())
@@ -109,8 +137,8 @@ def seed() -> None:
             record_event(db, owner.id, sample.id, "DOCUMENT_UPLOADED", "Seeded security sample document.")
             db.commit()
             db.refresh(sample)
-        elif not (STORAGE_DIR / sample.storage_key).exists():
-            (STORAGE_DIR / sample.storage_key).write_text(sample_text, encoding="utf-8")
+        elif not _sample_file_exists(sample.storage_key):
+            _store_sample_file(sample.storage_key, sample_text.encode("utf-8"))
             sample.size_bytes = len(sample_text.encode())
             db.commit()
 

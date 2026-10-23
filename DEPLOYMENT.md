@@ -63,8 +63,3 @@ Expected response is JSON with `status: ok` and `database: connected`. If the da
 ## Storage and deletion semantics
 
 Original documents are stored in a private Docker volume, not in frontend static assets. Office preview PDFs are created in a private cache and are removed by the document-delete handler. Revocation prevents later API requests; it cannot erase files that a user previously downloaded or screenshots of displayed content. Backups and storage snapshots need their own retention controls.
-
-
-## Vercel frontend deployment
-
-See [`VERCEL_DEPLOYMENT.md`](VERCEL_DEPLOYMENT.md). Vercel serves the Vite SPA from `frontend/`; the API remains a separate Docker service. The frontend reads `VITE_API_BASE_URL` at build time and falls back to `/api` for local use.

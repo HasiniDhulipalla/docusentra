@@ -1,0 +1,9 @@
+# Vercel serves the Vite build output; Docker/Nginx files are local-container-only.
+Dockerfile
+.dockerignore
+nginx.conf
+node_modules/
+dist/
+.env
+.env.*
+!.env.example

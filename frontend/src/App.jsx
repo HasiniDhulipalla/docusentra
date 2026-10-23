@@ -10,10 +10,11 @@ const TOKEN_KEY = 'trustvault_access_token';
 const THEME_KEY = 'trustvault_theme';
 const DOCUMENT_CATEGORIES = ['HR', 'Finance', 'Legal', 'Personal', 'Education', 'General', 'Others'];
 const LEGACY_CATEGORIES = ['Security', 'Contracts', 'Engineering', 'Customer', 'Policy'];
-// Use a same-origin /api path locally; in Vercel builds point to the separately hosted API origin.
-// Set VITE_API_BASE_URL to e.g. https://docusentra-api.onrender.com (origin only, no /api suffix).
 const API_ORIGIN = (import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/+$/, '');
 const API = `${API_ORIGIN}/api`;
+// Vercel Functions have a 4.5 MB request/response body limit. Set VITE_MAX_UPLOAD_BYTES=3800000 for cloud deployment.
+const MAX_UPLOAD_BYTES = Number(import.meta.env.VITE_MAX_UPLOAD_BYTES || 15 * 1024 * 1024);
+const MAX_UPLOAD_MB = (MAX_UPLOAD_BYTES / (1024 * 1024)).toFixed(1);
 
 async function apiRequest(path, { token, ...options } = {}) {
   const headers = new Headers(options.headers || {});
@@ -482,7 +483,7 @@ function App() {
   async function doUpload(event) {
     event.preventDefault();
     if (!uploadFile) { notify('Choose a file to upload.', 'error'); return; }
-    if (uploadFile.size > 15 * 1024 * 1024) { notify('File must be 15 MB or smaller.', 'error'); return; }
+    if (uploadFile.size > MAX_UPLOAD_BYTES) { notify(`File must be ${MAX_UPLOAD_MB} MB or smaller.`, 'error'); return; }
     const form = new FormData(); form.append('file', uploadFile); if (uploadTitle.trim()) form.append('title', uploadTitle.trim()); form.append('category', uploadCategory);
     setBusy(true);
     try {
@@ -656,7 +657,7 @@ function App() {
     </main>
 
     {modal === 'upload' && <Modal title="Upload a document" subtitle="Files remain private until you explicitly share them." onClose={() => { if (!busy) setModal(null); }}>
-      <form className="modal-form" onSubmit={doUpload}><label>Document name <span className="optional-label">Optional</span><input value={uploadTitle} onChange={(e) => setUploadTitle(e.target.value)} placeholder="Keep original filename if blank" maxLength={200} /></label><label>Document category<select value={uploadCategory} onChange={(e) => setUploadCategory(e.target.value)} required>{DOCUMENT_CATEGORIES.map((category) => <option key={category} value={category}>{category}</option>)}</select><small className="field-help">Choose the category before sharing this document with another person.</small></label><label className="upload-drop"><UploadCloud size={27} /><b>{uploadFile ? uploadFile.name : 'Choose a file to upload'}</b><span>{uploadFile ? prettyBytes(uploadFile.size) : 'PDF, Office, TXT, CSV, PNG or JPG · Max 15 MB'}</span><input type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.png,.jpg,.jpeg" onChange={(e) => setUploadFile(e.target.files?.[0] || null)} required /></label><div className="modal-note"><LockKeyhole size={15} /> Original files stay private. Readers can preview PDF, Office documents, images, TXT and CSV; the download API blocks Reader downloads.</div><div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setModal(null)} disabled={busy}>Cancel</button><button className="primary-button" type="submit" disabled={busy || !uploadFile}>{busy ? <RefreshCw className="spin" size={16} /> : <UploadCloud size={16} />}{busy ? 'Uploading…' : 'Upload securely'}</button></div></form>
+      <form className="modal-form" onSubmit={doUpload}><label>Document name <span className="optional-label">Optional</span><input value={uploadTitle} onChange={(e) => setUploadTitle(e.target.value)} placeholder="Keep original filename if blank" maxLength={200} /></label><label>Document category<select value={uploadCategory} onChange={(e) => setUploadCategory(e.target.value)} required>{DOCUMENT_CATEGORIES.map((category) => <option key={category} value={category}>{category}</option>)}</select><small className="field-help">Choose the category before sharing this document with another person.</small></label><label className="upload-drop"><UploadCloud size={27} /><b>{uploadFile ? uploadFile.name : 'Choose a file to upload'}</b><span>{uploadFile ? prettyBytes(uploadFile.size) : `PDF, Office, TXT, CSV, PNG or JPG · Max ${MAX_UPLOAD_MB} MB`}</span><input type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.png,.jpg,.jpeg" onChange={(e) => setUploadFile(e.target.files?.[0] || null)} required /></label><div className="modal-note"><LockKeyhole size={15} /> Original files stay private. Readers can preview PDF, Office documents, images, TXT and CSV; the download API blocks Reader downloads.</div><div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setModal(null)} disabled={busy}>Cancel</button><button className="primary-button" type="submit" disabled={busy || !uploadFile}>{busy ? <RefreshCw className="spin" size={16} /> : <UploadCloud size={16} />}{busy ? 'Uploading…' : 'Upload securely'}</button></div></form>
     </Modal>}
 
     {modal === 'preview' && selectedDoc && <Modal title="Read-only document preview" subtitle={selectedDoc.filename} onClose={() => { setModal(null); setSelectedDoc(null); setPreviewUrl(''); setPreviewPageCount(0); }} wide>

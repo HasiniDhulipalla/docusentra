@@ -4,9 +4,9 @@ A challenge-aligned local-development MVP built with **React + Vite**, **FastAPI
 
 > **Important:** this is a project/demo MVP, not a production-certified secure vault. Use test files only. Before sensitive/public use, harden authentication, secrets, deployment, uploads, backups, rate limits, and security testing.
 
-## Deploy frontend to Vercel
+## Deploy the full application from one Vercel project
 
-The React/Vite frontend is prepared for Vercel. The FastAPI API, PostgreSQL database, and persistent private file storage must be hosted separately. Follow [`VERCEL_DEPLOYMENT.md`](VERCEL_DEPLOYMENT.md) for the exact setup, required environment variables, CORS configuration, durable storage, and production seed steps. Set Vercel's Root Directory to `frontend` and configure `VITE_API_BASE_URL` to the HTTPS API origin only. Never put backend secrets in Vercel `VITE_*` variables.
+DocuSentra uses **Vercel Services** to deploy the React/Vite frontend and FastAPI backend together under one Vercel project and one HTTPS URL. The root `vercel.json` routes `/api/*` to FastAPI and all other paths to the frontend. Use a hosted Neon PostgreSQL database via `DATABASE_URL` and a **private Vercel Blob** store for durable document files; Vercel function disk is only temporary. Follow [`VERCEL_BACKEND_DEPLOYMENT.md`](VERCEL_BACKEND_DEPLOYMENT.md) for changing the project Root Directory to the repository root, removing the old `VITE_API_BASE_URL`, configuring the database/storage/secrets, and running production smoke tests. Do not reuse the old local Docker database/audit history for production. Vercel Services are currently Beta; review deployment logs and verify the actual live system before sharing documents.
 
 ## Additional workspace features
 
@@ -135,14 +135,14 @@ Open **http://localhost:5173**. Vite proxies `/api` requests to `http://127.0.0.
 
 ## Tests and build checks
 
-Backend tests (from the `backend` folder; current authoring environment has 24 passing tests):
+Backend tests (run from the `backend` folder):
 
 ```powershell
 py -m pip install -r requirements.txt
 py -m pytest -q
 ```
 
-The latest reported backend suite contains **20 passing tests** in the authoring environment. The exact test matrix and residual risks are in `SECURITY_TEST_MATRIX.md`. The latest Vite production build and deployed-system attack tests still need to be run on the target machine. Use `THREATS.md`, `PROMPTS.md`, `FUNCTIONAL_REQUIREMENTS.md`, `API_AUTHORIZATION.md`, `DATABASE_SCHEMA.md`, `DEPLOYMENT.md`, `PROJECT_WRITEUP.md`, `DEMO_SCRIPT.md`, and `SCORECARD.md` to prepare the submission. The supplied official 10 requirements are mapped in `FUNCTIONAL_REQUIREMENTS.md`; still verify the exact final deployment.
+The Vercel-ready backend suite currently contains **34 passing tests** in the authoring environment. The exact test matrix and residual risks are in `SECURITY_TEST_MATRIX.md`. The latest Vite production build and deployed-system attack tests still need to be run on the target machine. Use `THREATS.md`, `PROMPTS.md`, `FUNCTIONAL_REQUIREMENTS.md`, `API_AUTHORIZATION.md`, `DATABASE_SCHEMA.md`, `DEPLOYMENT.md`, `PROJECT_WRITEUP.md`, `DEMO_SCRIPT.md`, and `SCORECARD.md` to prepare the submission. The supplied official 10 requirements are mapped in `FUNCTIONAL_REQUIREMENTS.md`; still verify the exact final deployment.
 
 Frontend production build:
 
@@ -166,6 +166,7 @@ npm run build
 
 ```text
 trustvault-starter/
+├── vercel.json
 ├── docker-compose.yml
 ├── THREATS.md
 ├── PROMPTS.md
@@ -177,6 +178,7 @@ trustvault-starter/
 ├── PROJECT_WRITEUP.md
 ├── GIT_PUBLISHING.md
 ├── DEPLOYMENT.md
+├── VERCEL_BACKEND_DEPLOYMENT.md
 ├── DEMO_SCRIPT.md
 ├── SCORECARD.md
 ├── backend/

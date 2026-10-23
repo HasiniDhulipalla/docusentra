@@ -42,15 +42,20 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sess
 BASE_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(BASE_DIR / ".env")
 APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./trustvault.db").strip()
-# Managed PostgreSQL providers (including Render) commonly supply postgres:// or
-# postgresql:// URLs. This project installs psycopg v3, so normalize those URLs to
-# SQLAlchemy's explicit psycopg dialect rather than requiring manual URL editing.
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = "postgresql+psycopg://" + DATABASE_URL[len("postgres://"):]
-elif DATABASE_URL.startswith("postgresql://"):
-    DATABASE_URL = "postgresql+psycopg://" + DATABASE_URL[len("postgresql://"):]
-STORAGE_DIR = Path(os.getenv("STORAGE_DIR", str(BASE_DIR / "private_storage"))).resolve()
+
+def normalize_database_url(value: str) -> str:
+    """Normalize common managed-Postgres URLs to the installed psycopg v3 driver."""
+    value = (value or "sqlite:///./trustvault.db").strip()
+    if value.startswith("postgres://"):
+        return "postgresql+psycopg://" + value[len("postgres://"):]
+    if value.startswith("postgresql://"):
+        return "postgresql+psycopg://" + value[len("postgresql://"):]
+    return value
+
+DATABASE_URL = normalize_database_url(os.getenv("DATABASE_URL", "sqlite:///./trustvault.db"))
+STORAGE_DIR = Path(os.getenv("STORAGE_DIR", "/tmp/docusentra" if os.getenv("VERCEL") else str(BASE_DIR / "private_storage"))).resolve()
+STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "filesystem").strip().lower()
+VERCEL_RUNTIME = os.getenv("VERCEL", "").strip() == "1"
 # In local development an ephemeral secret is safer than a known hard-coded key.
 # Set TOKEN_SECRET explicitly for any environment where sessions must survive restarts.
 TOKEN_SECRET = os.getenv("TOKEN_SECRET", "").strip()
@@ -74,7 +79,11 @@ ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
 UPLOAD_CATEGORIES = {"hr": "HR", "finance": "Finance", "legal": "Legal", "personal": "Personal", "education": "Education", "general": "General", "others": "Others", "security": "Security", "contracts": "Contracts", "engineering": "Engineering", "customer": "Customer", "policy": "Policy"}
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {"connect_timeout": 5}
-engine = create_engine(DATABASE_URL, pool_pre_ping=True, connect_args=connect_args)
+if VERCEL_RUNTIME:
+    # Serverless instances should keep a small pool; Neon pooled URLs are recommended.
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_size=1, max_overflow=0, pool_timeout=5, pool_recycle=300, connect_args=connect_args)
+else:
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True, connect_args=connect_args)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
 
 
@@ -265,6 +274,8 @@ def validate_runtime_config() -> None:
         raise RuntimeError("TOKEN_TTL_SECONDS must be between 60 seconds and 24 hours.")
     if MAX_UPLOAD_BYTES < 1 or MAX_UPLOAD_BYTES > 100 * 1024 * 1024:
         raise RuntimeError("MAX_UPLOAD_BYTES must be between 1 byte and 100 MB.")
+    if VERCEL_RUNTIME and APP_ENV == "production" and MAX_UPLOAD_BYTES > 4_000_000:
+        raise RuntimeError("On Vercel, set MAX_UPLOAD_BYTES to 4000000 or less because Function request bodies are limited to 4.5 MB.")
     if APP_ENV == "production":
         lowered_secret = TOKEN_SECRET.lower()
         if len(TOKEN_SECRET) < 32 or len(set(TOKEN_SECRET)) < 12 or any(marker in lowered_secret for marker in ("change-me", "replace-this", "local-only", "example", "secret-here", "password", "default")):
@@ -288,6 +299,67 @@ def validate_runtime_config() -> None:
             raise RuntimeError("Production FRONTEND_ORIGINS must list explicit trusted origins.")
         if all(origin.startswith("http://localhost") or origin.startswith("http://127.0.0.1") for origin in FRONTEND_ORIGINS):
             raise RuntimeError("Production FRONTEND_ORIGINS must list the deployed HTTPS frontend origin, not only localhost.")
+        if VERCEL_RUNTIME and STORAGE_BACKEND != "vercel_blob":
+            raise RuntimeError("Vercel deployment requires STORAGE_BACKEND=vercel_blob; function filesystems are ephemeral.")
+        if VERCEL_RUNTIME and not (os.getenv("BLOB_STORE_ID") or os.getenv("BLOB_READ_WRITE_TOKEN") or os.getenv("VERCEL_BLOB_READ_WRITE_TOKEN")):
+            raise RuntimeError("Connect a private Vercel Blob store to this project before starting the API.")
+
+
+def _uses_vercel_blob() -> bool:
+    return STORAGE_BACKEND == "vercel_blob"
+
+
+def _blob_path(storage_key: str) -> str:
+    # The database stores only a random opaque key; never use a user-supplied filename as a Blob path.
+    return f"docusentra/documents/{storage_key}"
+
+
+def _blob_sync_client():
+    try:
+        from vercel.blob import sync as blob_sync
+    except ImportError as exc:
+        raise RuntimeError("Install the vercel-blob Python SDK to use Vercel private storage.") from exc
+    return blob_sync
+
+
+def _document_file_path(storage_key: str) -> Path:
+    """Resolve a document to a private local path, downloading private Blob data to /tmp when deployed on Vercel.
+
+    Authorization must be checked by the caller before calling this helper. The local cache is temporary and is
+    never exposed as a public/static directory. Blob objects stay private and the SDK token is server-side only.
+    """
+    path = STORAGE_DIR / storage_key
+    if not _uses_vercel_blob():
+        return path
+    if path.is_file() and path.stat().st_size > 0:
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        result = _blob_sync_client().get_blob(_blob_path(storage_key), access="private")
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=410, detail="The stored document is no longer available.") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Private document storage is temporarily unavailable.") from exc
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_bytes(result.body)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return path
+
+
+def _delete_document_file(storage_key: str) -> None:
+    """Delete the private original from configured storage and remove any ephemeral local cache."""
+    if _uses_vercel_blob():
+        try:
+            _blob_sync_client().delete_blob(_blob_path(storage_key))
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            # A deleted DB row remains inaccessible even if storage cleanup must be retried operationally.
+            raise HTTPException(status_code=503, detail="The document was deleted from the library, but private storage cleanup failed.") from exc
+    (STORAGE_DIR / storage_key).unlink(missing_ok=True)
 
 
 ZERO_AUDIT_HASH = "0" * 64
@@ -824,7 +896,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(
-    title="TrustVault API",
+    title="DocuSentra API",
     description="Private document sharing with server-side authorization and audit events.",
     version="1.1.0",
     docs_url=None if APP_ENV == "production" else "/docs",
@@ -1132,7 +1204,7 @@ def require_admin(db: Session, user: User) -> None:
 
 @app.get("/")
 def root() -> dict[str, str]:
-    return {"name": "TrustVault API", "version": "1.1.0", "docs": "/docs" if APP_ENV != "production" else "disabled", "health": "/api/health"}
+    return {"name": "DocuSentra API", "version": "1.2.0", "docs": "/docs" if APP_ENV != "production" else "disabled", "health": "/api/health"}
 
 
 @app.get("/api/health")
@@ -1371,7 +1443,10 @@ async def upload_document(
     storage_key = uuid.uuid4().hex
     destination = STORAGE_DIR / storage_key
     size = 0
+    blob_saved = False
+    content_type = mimetypes.guess_type(raw_name)[0] or "application/octet-stream"
     try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
         with destination.open("wb") as out:
             while True:
                 chunk = await file.read(1024 * 1024)
@@ -1384,7 +1459,18 @@ async def upload_document(
         if size == 0:
             raise HTTPException(status_code=400, detail="The uploaded file is empty.")
         validate_uploaded_content(destination, extension)
-        content_type = mimetypes.guess_type(raw_name)[0] or "application/octet-stream"
+        if _uses_vercel_blob():
+            try:
+                from vercel import blob as vercel_blob
+                await vercel_blob.put_blob(
+                    _blob_path(storage_key), destination.read_bytes(), access="private",
+                    content_type=content_type, add_random_suffix=False,
+                )
+                blob_saved = True
+                # Do not keep the original copy in the ephemeral filesystem once it is durably stored.
+                destination.unlink(missing_ok=True)
+            except Exception as exc:
+                raise HTTPException(status_code=503, detail="Private document storage upload failed. Please retry.") from exc
         doc = Document(owner_id=user.id, filename=safe_name, category=safe_category, storage_key=storage_key, content_type=content_type, size_bytes=size)
         db.add(doc)
         db.flush()
@@ -1395,10 +1481,22 @@ async def upload_document(
     except HTTPException:
         db.rollback()
         destination.unlink(missing_ok=True)
+        if blob_saved:
+            try:
+                from vercel import blob as vercel_blob
+                await vercel_blob.delete_blob(_blob_path(storage_key))
+            except Exception:
+                pass
         raise
     except Exception:
         db.rollback()
         destination.unlink(missing_ok=True)
+        if blob_saved:
+            try:
+                from vercel import blob as vercel_blob
+                await vercel_blob.delete_blob(_blob_path(storage_key))
+            except Exception:
+                pass
         raise HTTPException(status_code=500, detail="Upload failed. Please try again.")
     finally:
         await file.close()
@@ -1464,23 +1562,29 @@ def pdf_for_preview(doc: Document, source_path: Path) -> Path:
 
 
 def get_pdf_page_count(pdf_path: Path) -> int:
-    """Read page count with Poppler and cap costly previews of very large documents."""
+    """Read page count using Poppler locally or PyMuPDF on Vercel where OS binaries are unavailable."""
     pdfinfo = shutil.which("pdfinfo")
     if not pdfinfo:
-        raise HTTPException(status_code=503, detail="Secure page preview is unavailable. Rebuild the backend image with Poppler tools installed.")
-    try:
-        result = subprocess.run(
-            [pdfinfo, str(pdf_path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, timeout=12, check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise HTTPException(status_code=422, detail="This document took too long to inspect for preview.") from exc
-    if result.returncode != 0:
-        raise HTTPException(status_code=422, detail="This PDF could not be read for secure preview. It may be damaged or password protected.")
-    match = re.search(r"^Pages:\s+(\d+)\s*$", result.stdout, flags=re.MULTILINE)
-    if not match:
-        raise HTTPException(status_code=422, detail="Could not determine the number of pages in this document.")
-    count = int(match.group(1))
+        try:
+            import fitz  # PyMuPDF ships its rendering engine as a Python wheel.
+            with fitz.open(pdf_path) as document:
+                count = len(document)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail="This PDF could not be read for secure preview.") from exc
+    else:
+        try:
+            result = subprocess.run(
+                [pdfinfo, str(pdf_path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, timeout=12, check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise HTTPException(status_code=422, detail="This document took too long to inspect for preview.") from exc
+        if result.returncode != 0:
+            raise HTTPException(status_code=422, detail="This PDF could not be read for secure preview. It may be damaged or password protected.")
+        match = re.search(r"^Pages:\s+(\d+)\s*$", result.stdout, flags=re.MULTILINE)
+        if not match:
+            raise HTTPException(status_code=422, detail="Could not determine the number of pages in this document.")
+        count = int(match.group(1))
     if count < 1:
         raise HTTPException(status_code=422, detail="This document has no pages to preview.")
     if count > MAX_PREVIEW_PAGES:
@@ -1489,52 +1593,79 @@ def get_pdf_page_count(pdf_path: Path) -> int:
 
 
 def render_pdf_page_cached(doc: Document, pdf_path: Path, page_number: int) -> Path:
-    """Render one PDF page to a private PNG cache, never expose the PDF to the browser viewer."""
+    """Render one PDF page to a private PNG cache using Poppler or PyMuPDF."""
     renderer = shutil.which("pdftoppm")
-    if not renderer:
-        raise HTTPException(status_code=503, detail="Secure page preview is unavailable. Rebuild the backend image with Poppler tools installed.")
     stat = pdf_path.stat()
     PREVIEW_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     cached_page = PREVIEW_CACHE_DIR / f"{doc.storage_key}-{stat.st_size}-{stat.st_mtime_ns}-page-{page_number}.png"
     if cached_page.is_file() and cached_page.stat().st_size > 0:
         return cached_page
 
-    with tempfile.TemporaryDirectory(prefix="trustvault-page-") as temp_name:
-        prefix = Path(temp_name) / "page"
-        command = [renderer, "-f", str(page_number), "-l", str(page_number), "-r", "110", "-png", "-singlefile", str(pdf_path), str(prefix)]
+    temporary = PREVIEW_CACHE_DIR / f".{cached_page.name}.{uuid.uuid4().hex}.tmp.png"
+    if renderer:
+        with tempfile.TemporaryDirectory(prefix="trustvault-page-") as temp_name:
+            prefix = Path(temp_name) / "page"
+            command = [renderer, "-f", str(page_number), "-l", str(page_number), "-r", "110", "-png", "-singlefile", str(pdf_path), str(prefix)]
+            try:
+                result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20, check=False)
+            except subprocess.TimeoutExpired as exc:
+                raise HTTPException(status_code=422, detail="Rendering this page took too long. Try a simpler document.") from exc
+            generated = Path(f"{prefix}.png")
+            if result.returncode != 0 or not generated.is_file() or generated.stat().st_size == 0:
+                raise HTTPException(status_code=404, detail="This page does not exist or could not be rendered.")
+            shutil.copyfile(generated, temporary)
+    else:
         try:
-            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20, check=False)
-        except subprocess.TimeoutExpired as exc:
-            raise HTTPException(status_code=422, detail="Rendering this page took too long. Try a simpler document.") from exc
-        generated = Path(f"{prefix}.png")
-        if result.returncode != 0 or not generated.is_file() or generated.stat().st_size == 0:
-            raise HTTPException(status_code=404, detail="This page does not exist or could not be rendered.")
-        temporary = PREVIEW_CACHE_DIR / f".{cached_page.name}.{uuid.uuid4().hex}.tmp"
-        shutil.copyfile(generated, temporary)
-        os.replace(temporary, cached_page)
+            import fitz
+            with fitz.open(pdf_path) as document:
+                if page_number < 1 or page_number > len(document):
+                    raise HTTPException(status_code=404, detail="This page does not exist.")
+                page = document.load_page(page_number - 1)
+                rect = page.rect
+                scale = min(1.35, 1500 / max(rect.width, 1), 1900 / max(rect.height, 1))
+                pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+                pixmap.save(str(temporary))
+        except HTTPException:
+            temporary.unlink(missing_ok=True)
+            raise
+        except Exception as exc:
+            temporary.unlink(missing_ok=True)
+            raise HTTPException(status_code=422, detail="This PDF page could not be rendered by the available preview engine.") from exc
+    os.replace(temporary, cached_page)
     return cached_page
 
 
-def _prepare_preview_png(path: Path) -> bytes:
-    """Re-encode a preview image as PNG without adding visible watermark text."""
+def _prepare_preview_image(path: Path) -> bytes:
+    """Re-encode a preview without metadata or visible watermark text.
+
+    Vercel responses are encoded as JPEG to keep raster previews comfortably below
+    the platform's 4.5 MB function response-body limit. Local Docker previews stay PNG.
+    """
     try:
         with Image.open(path) as opened:
             opened.load()
             preview = opened.convert("RGB")
+            preview.thumbnail((1400, 1800), Image.Resampling.LANCZOS)
     except (OSError, UnidentifiedImageError, Image.DecompressionBombError) as exc:
         raise HTTPException(status_code=422, detail="This page could not be prepared as a safe preview image.") from exc
 
     output = BytesIO()
-    preview.save(output, format="PNG", optimize=True)
+    if VERCEL_RUNTIME:
+        preview.save(output, format="JPEG", quality=82, optimize=True, progressive=True)
+    else:
+        preview.save(output, format="PNG", optimize=True, compress_level=9)
     return output.getvalue()
 
 
 def preview_image_response(path: Path, filename: str = "preview.png") -> Response:
     """Serve a re-encoded preview image without visible watermarking or metadata."""
-    image_bytes = _prepare_preview_png(path)
+    image_bytes = _prepare_preview_image(path)
+    is_vercel_jpeg = VERCEL_RUNTIME
+    if is_vercel_jpeg:
+        filename = Path(filename).with_suffix(".jpg").name
     return Response(
         content=image_bytes,
-        media_type="image/png",
+        media_type="image/jpeg" if is_vercel_jpeg else "image/png",
         headers={
             "Content-Disposition": f'inline; filename="{filename}"',
             "X-Content-Type-Options": "nosniff",
@@ -1577,6 +1708,63 @@ def extract_read_only_preview(doc: Document, path: Path) -> list[dict]:
             blocks.append({"type": "paragraph", "text": "Preview truncated because the document is very large."})
         return blocks
 
+    if extension == ".xlsx":
+        try:
+            from openpyxl import load_workbook
+            workbook = load_workbook(path, read_only=True, data_only=True)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail="This spreadsheet could not be read for preview.") from exc
+        used = 0
+        try:
+            for sheet in workbook.worksheets:
+                blocks.append({"type": "paragraph", "text": f"Sheet: {sheet.title}"})
+                rows = []
+                for row in sheet.iter_rows(values_only=True):
+                    values = [str(value)[:1000] if value is not None else "" for value in row]
+                    used += sum(len(value) for value in values)
+                    rows.append(values)
+                    if used >= character_budget or len(rows) >= 500:
+                        break
+                if rows:
+                    blocks.append({"type": "table", "rows": rows})
+                if used >= character_budget:
+                    blocks.append({"type": "paragraph", "text": "Preview truncated because the workbook is very large."})
+                    break
+        finally:
+            workbook.close()
+        return blocks
+
+    if extension == ".pptx":
+        try:
+            from pptx import Presentation
+            presentation = Presentation(str(path))
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail="This presentation could not be read for preview.") from exc
+        used = 0
+        for slide_number, slide in enumerate(presentation.slides, start=1):
+            blocks.append({"type": "paragraph", "text": f"Slide {slide_number}"})
+            for shape in slide.shapes:
+                if getattr(shape, "has_text_frame", False):
+                    content = shape.text.strip()
+                    if content and used < character_budget:
+                        content = content[:character_budget - used]
+                        blocks.append({"type": "paragraph", "text": content})
+                        used += len(content)
+                if getattr(shape, "has_table", False) and used < character_budget:
+                    rows = []
+                    for row in shape.table.rows:
+                        values = [cell.text.strip()[:1000] for cell in row.cells]
+                        used += sum(len(value) for value in values)
+                        rows.append(values)
+                        if used >= character_budget:
+                            break
+                    if rows:
+                        blocks.append({"type": "table", "rows": rows})
+            if used >= character_budget:
+                blocks.append({"type": "paragraph", "text": "Preview truncated because the presentation is very large."})
+                break
+        return blocks
+
     if extension in {".txt", ".csv"}:
         content = path.read_text(encoding="utf-8", errors="replace")
         if len(content) > character_budget:
@@ -1597,7 +1785,7 @@ def _text_preview_lines(doc: Document, source_path: Path) -> list[str]:
     extension = Path(doc.filename).suffix.lower()
     if extension in {".txt", ".csv"}:
         content = source_path.read_text(encoding="utf-8", errors="replace")
-    elif extension == ".docx":
+    elif extension in {".docx", ".xlsx", ".pptx"}:
         blocks = extract_read_only_preview(doc, source_path)
         display_lines: list[str] = []
         for block in blocks:
@@ -1665,7 +1853,7 @@ def render_text_page_cached(doc: Document, source_path: Path, page_number: int) 
         title_font = ImageFont.load_default()
         meta_font = ImageFont.load_default()
 
-    draw.text((78, 48), "TRUSTVAULT • READ-ONLY PREVIEW", fill=(34, 70, 125), font=title_font)
+    draw.text((78, 48), "DOCUSENTRA • READ-ONLY PREVIEW", fill=(34, 70, 125), font=title_font)
     draw.text((80, 88), doc.filename[:100], fill=(95, 107, 127), font=meta_font)
     draw.line((80, 118, TEXT_PREVIEW_PAGE_WIDTH - 80, 118), fill=(218, 225, 235), width=2)
     y = 146
@@ -1685,7 +1873,7 @@ def render_text_page_cached(doc: Document, source_path: Path, page_number: int) 
 def preview_document(document_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> dict:
     doc = get_document_or_404(db, document_id)
     role = resolve_role(db, doc, user)
-    path = STORAGE_DIR / doc.storage_key
+    path = _document_file_path(doc.storage_key)
     if not path.is_file():
         raise HTTPException(status_code=410, detail="The stored document is no longer available.")
 
@@ -1700,12 +1888,13 @@ def preview_document(document_id: int, db: Session = Depends(get_db), user: User
             preview_type = "pages"
         elif extension in OFFICE_EXTENSIONS:
             if not (shutil.which("soffice") or shutil.which("libreoffice")):
-                # Keep a readable, non-selectable fallback even when LibreOffice is unavailable.
-                if extension == ".docx":
+                # Serverless Vercel functions do not install OS-level LibreOffice binaries.
+                # Render text-based fallbacks for modern OpenXML formats instead.
+                if extension in {".docx", ".xlsx", ".pptx"}:
                     page_count = get_text_preview_page_count(doc, path)
                     preview_type = "pages"
                 else:
-                    raise HTTPException(status_code=415, detail="Office preview converter is unavailable. Rebuild the backend image.")
+                    raise HTTPException(status_code=415, detail="Preview for legacy .doc/.xls/.ppt requires the desktop converter; download remains available to Editors/Owners.")
             else:
                 pdf_path = pdf_for_preview(doc, path)
                 page_count = get_pdf_page_count(pdf_path)
@@ -1742,7 +1931,7 @@ def preview_document_content(document_id: int, db: Session = Depends(get_db), us
     """Serve re-encoded image previews; PDF/Office content is exposed as individual raster pages."""
     doc = get_document_or_404(db, document_id)
     resolve_role(db, doc, user)
-    original_path = STORAGE_DIR / doc.storage_key
+    original_path = _document_file_path(doc.storage_key)
     if not original_path.is_file():
         raise HTTPException(status_code=410, detail="The stored document is no longer available.")
 
@@ -1767,22 +1956,21 @@ def preview_document_page(
     resolve_role(db, doc, user)
     if page_number < 1 or page_number > MAX_PREVIEW_PAGES:
         raise HTTPException(status_code=404, detail="This page is outside the preview range.")
-    original_path = STORAGE_DIR / doc.storage_key
+    original_path = _document_file_path(doc.storage_key)
     if not original_path.is_file():
         raise HTTPException(status_code=410, detail="The stored document is no longer available.")
 
     extension = Path(doc.filename).suffix.lower()
     try:
-        if extension in {".txt", ".csv"} or (extension == ".docx" and not (shutil.which("soffice") or shutil.which("libreoffice"))):
+        no_office_converter = not (shutil.which("soffice") or shutil.which("libreoffice"))
+        if extension in {".txt", ".csv"} or (extension in {".docx", ".xlsx", ".pptx"} and no_office_converter):
             rendered_page = render_text_page_cached(doc, original_path, page_number)
-        elif extension == ".pdf" or extension in OFFICE_EXTENSIONS:
-            if extension in OFFICE_EXTENSIONS and not (shutil.which("soffice") or shutil.which("libreoffice")):
-                raise HTTPException(status_code=415, detail="Office preview converter is unavailable for this file type.")
+        elif extension == ".pdf" or (extension in OFFICE_EXTENSIONS and not no_office_converter):
             pdf_path = pdf_for_preview(doc, original_path)
             rendered_page = render_pdf_page_cached(doc, pdf_path, page_number)
         else:
             raise HTTPException(status_code=415, detail="This document does not support paged preview.")
-        content = _prepare_preview_png(rendered_page)
+        content = _prepare_preview_image(rendered_page)
     except HTTPException:
         raise
     except Exception as exc:
@@ -1793,11 +1981,12 @@ def preview_document_page(
     record_event(db, user.id, doc.id, "DOCUMENT_PAGE_VIEWED", f"Rendered read-only preview page {page_number}.")
     db.commit()
     # Original PDF bytes are not sent to the browser; the authorized viewer receives raster page pixels.
+    is_vercel_jpeg = VERCEL_RUNTIME
     return Response(
         content=content,
-        media_type="image/png",
+        media_type="image/jpeg" if is_vercel_jpeg else "image/png",
         headers={
-            "Content-Disposition": 'inline; filename="trustvault-page.png"',
+            "Content-Disposition": 'inline; filename="trustvault-page.jpg"' if is_vercel_jpeg else 'inline; filename="trustvault-page.png"',
             "X-Content-Type-Options": "nosniff",
             "Cache-Control": "no-store, max-age=0",
             "Pragma": "no-cache",
@@ -1814,7 +2003,7 @@ def download_document(document_id: int, db: Session = Depends(get_db), user: Use
         record_event(db, user.id, doc.id, "ACCESS_DENIED", f"Reader attempted to download {doc.filename}; download is editor/owner only.")
         db.commit()
         raise HTTPException(status_code=403, detail="Reader permission is view-only. Use Preview to read this document; ask the owner for Editor access if you need to download it.")
-    path = STORAGE_DIR / doc.storage_key
+    path = _document_file_path(doc.storage_key)
     if not path.is_file():
         raise HTTPException(status_code=410, detail="The stored document is no longer available.")
     record_event(db, user.id, doc.id, "DOCUMENT_DOWNLOADED", f"Downloaded {doc.filename}.")
@@ -1845,7 +2034,6 @@ def rename_document(document_id: int, payload: RenameInput, db: Session = Depend
 def delete_document(document_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> None:
     doc = get_document_or_404(db, document_id)
     require_owner(db, doc, user)
-    storage_path = STORAGE_DIR / doc.storage_key
     name = doc.filename
     # Soft deletion preserves stable audit references; app routes treat deleted docs as 404.
     # Record each access removal before removing the active grants.
@@ -1858,7 +2046,7 @@ def delete_document(document_id: int, db: Session = Depends(get_db), user: User 
     record_event(db, user.id, doc.id, "DOCUMENT_DELETED", f"Deleted document {name} (ID {doc.id}).")
     doc.deleted_at = now_utc()
     db.commit()
-    storage_path.unlink(missing_ok=True)
+    _delete_document_file(doc.storage_key)
     # Remove rendered Office previews too; they may contain the full document text.
     cache_dir = STORAGE_DIR / ".preview_cache"
     if cache_dir.is_dir():
