@@ -11,13 +11,13 @@ def test_vercel_entrypoint_exports_the_fastapi_asgi_app():
     assert getattr(vercel_app, "openapi_url", None) == "/openapi.json"
 
 
-def test_combined_vercel_config_uses_conventional_asgi_entrypoint():
+def test_combined_vercel_config_uses_container_backend_and_same_domain_api_routes():
     project_root = Path(__file__).resolve().parents[2]
     config = json.loads((project_root / "vercel.json").read_text(encoding="utf-8"))
     backend = config["services"]["backend"]
     assert backend["root"] == "backend/"
-    assert backend["framework"] == "fastapi"
-    assert backend["entrypoint"] == "index:app"
+    assert backend["runtime"] == "container"
+    assert (project_root / "backend" / "Dockerfile").exists()
     assert config["rewrites"][0]["source"] == "/api/(.*)"
     assert config["rewrites"][0]["destination"] == {"service": "backend"}
 

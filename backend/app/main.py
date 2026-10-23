@@ -490,12 +490,15 @@ def apply_legacy_schema_migrations() -> None:
         },
     }
     dialect = engine.dialect.name
-    inspector = inspect(engine)
+    # Use the transaction's checked-out connection for all schema introspection.
+    # On serverless deployments the pool may be size 1; inspect(engine) inside
+    # engine.begin() checks out a second connection and deadlocks until pool_timeout.
     with engine.begin() as connection:
+        inspector = inspect(connection)
         for table_name, additions in columns_to_add.items():
             if not inspector.has_table(table_name):
                 continue
-            present = {column["name"] for column in inspect(engine).get_columns(table_name)}
+            present = {column["name"] for column in inspector.get_columns(table_name)}
             for column_name, (sqlite_ddl, postgres_ddl) in additions.items():
                 if column_name in present:
                     continue

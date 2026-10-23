@@ -15,13 +15,7 @@
     },
     "backend": {
       "root": "backend/",
-      "framework": "fastapi",
-      "entrypoint": "index:app",
-      "functions": {
-        "index.py": {
-          "maxDuration": 60
-        }
-      }
+      "runtime": "container"
     }
   },
   "rewrites": [

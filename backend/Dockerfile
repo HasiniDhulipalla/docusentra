@@ -1,5 +1,5 @@
 FROM python:3.12-slim
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PORT=8000
 WORKDIR /app
 # LibreOffice supplies a headless PDF preview rendition for DOC/DOCX,
 # XLS/XLSX and PPT/PPTX. Preview output is served through the authenticated API.
@@ -12,4 +12,4 @@ COPY app ./app
 RUN mkdir -p /app/private_storage && useradd --create-home --uid 10001 appuser && chown -R appuser:appuser /app
 USER appuser
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

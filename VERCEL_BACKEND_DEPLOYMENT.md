@@ -35,7 +35,7 @@ git push
 The services are configured as:
 
 - Frontend service: root `frontend/`, Vite build `npm run build`, output `dist`, SPA fallback to `/index.html`.
-- Backend service: root `backend/`, FastAPI ASGI entrypoint `index:app` (the `backend/index.py` wrapper imports `app.main:app`), max function duration 60 seconds. The backend requirements use the official `vercel` Python SDK for Blob APIs.
+- Backend service: root `backend/`, built as a Docker container using `backend/Dockerfile`. This avoids Vercel's generated Python Function handler, which in the reported deployment failed importing `vc_handler`. The Docker command starts Uvicorn and listens on the Vercel-provided `PORT` (default 8000). The backend requirements use the official `vercel` Python SDK for Blob APIs.
 - Public routing: `/api/*` goes to the backend service, then `/*` to the frontend service. The API receives the original `/api/...` path.
 
 ## 3. Remove the old split-backend URL from frontend environment
@@ -98,11 +98,15 @@ The public registration endpoint creates standard owner accounts; it does not le
 - Vercel Services are currently Beta and available across plans; account UI may differ. If Services configuration is rejected, read the Vercel deployment logs rather than reverting to split projects silently.
 - Vercel Functions have a 4.5 MB request/response body limit, so the app is configured to 3.8 MB uploads. This is a demo constraint.
 - Vercel function filesystems are ephemeral. Durable originals must go to private Blob; `/tmp` is only temporary preview/cache data.
-- Vercel serverless does not include LibreOffice, so Office preview fidelity is limited compared with the local Docker build.
+- The backend is configured as a Vercel Services container so it can include system packages such as LibreOffice; container support and Vercel Services availability depend on the current project/plan rollout. Verify the runtime in deployment logs.
 - An ordinary browser application cannot reliably prevent OS screenshots or screen recording.
 - This remains a challenge/demo MVP. Verify all authorization routes and the live deployment before using real confidential documents.
 
 
-## Runtime import fix
+## Runtime incident fix
 
-The backend exposes a conventional `backend/index.py` entrypoint and uses `entrypoint: "index:app"`. This avoids relying on a nested module path for ASGI detection. The `requirements.txt` uses the official `vercel` package, because application code imports `vercel.blob`; the unrelated `vercel-blob` distribution is not the SDK used by this source.
+The backend now uses `runtime: "container"` in the Vercel Services config and the Vercel deployment must include `backend/Dockerfile` (do not exclude it in `.vercelignore`). This avoids the generated `vc__handler__python.py` / `vc_handler` runtime import failure seen in the prior deployment. The Dockerfile binds Uvicorn to `$PORT` (default 8000).
+
+Startup schema migration also uses the single checked-out SQLAlchemy connection for inspection and DDL. This avoids a deadlock/timeout when the serverless database pool is intentionally configured with `pool_size=1` and `max_overflow=0`.
+
+The `requirements.txt` uses the official `vercel` Python SDK because application code imports `vercel.blob`; the unrelated `vercel-blob` distribution is not the SDK used by this source.
